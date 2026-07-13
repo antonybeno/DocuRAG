@@ -1,0 +1,6 @@
+.venv
+.idea
+faiss_index
+data
+processed_documents
+uploaded_documents

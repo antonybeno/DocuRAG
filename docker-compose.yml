@@ -1,0 +1,140 @@
+services:
+  # RAG API (FastAPI)
+  rag-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: rag-api
+
+    ports:
+      - "8001:8001"
+
+    environment:
+      OTEL_SERVICE_NAME: rag-api
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      PYTHONPATH: /app/src
+      OLLAMA_BASE_URL: http://ollama:11434
+
+      PROMETHEUS_PORT: 8001
+
+    depends_on:
+      jaeger:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+
+    networks:
+      - monitoring
+
+    command:
+      uvicorn src.app:app --host 0.0.0.0 --port 8001
+
+    restart: unless-stopped
+
+  # ollama
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - monitoring
+
+
+  # Jaeger Tracing Backend
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+
+    container_name: jaeger
+
+    ports:
+      - "16686:16686"
+
+      - "4317:4317"
+      - "4318:4318"
+
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+    networks:
+      - monitoring
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--spider",
+          "-q",
+          "http://localhost:16686"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    restart: unless-stopped
+
+  # prometheus
+  prometheus:
+    image: prom/prometheus:latest
+
+    container_name: prometheus
+
+    ports:
+      - "9090:9090"
+
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+
+    networks:
+      - monitoring
+
+    restart: unless-stopped
+
+  # grafana
+  grafana:
+    image: grafana/grafana:latest
+
+    container_name: grafana
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+
+    depends_on:
+      prometheus:
+        condition: service_started
+
+      jaeger:
+        condition: service_started
+
+    networks:
+      - monitoring
+
+    restart: unless-stopped
+
+networks:
+  monitoring:
+    driver: bridge
+
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  ollama_data:
