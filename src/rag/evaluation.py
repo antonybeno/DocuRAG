@@ -17,124 +17,56 @@ class RAGEvaluator:
 
     def _embed_documents(self, docs: List[Document]):
         return self.embedding_model.embed_documents(
-            [doc.page_content for doc in docs]
+            [
+                doc.page_content
+                for doc in docs
+            ]
         )
 
-    def retrieval_similarity(
-        self,
-        query: str,
-        retrieved_docs: List[Document],
-    ) -> float:
-        if not retrieved_docs:
-            return 0.0
+    @staticmethod
+    def _normalize_score(score: float) -> float:
+        return float(max(0.0, min(score, 1.0)))
 
-        try:
-            query_embedding = self._embed_query(query)
-
-            doc_embeddings = self._embed_documents(
-                retrieved_docs
-            )
-
-            similarities = cosine_similarity(
-                [query_embedding],
-                doc_embeddings
-            )[0]
-
-            weights = np.linspace(
-                1.0,
-                0.5,
-                len(similarities)
-            )
-
-            score = float(
-                np.average(
-                    similarities,
-                    weights=weights
-                )
-            )
-
-            logger.info(
-                "Retrieval similarity: %.3f",
-                score
-            )
-
-            return score
-        except Exception as e:
-            logger.exception(
-                f"Failed to compute retrieval similarity: {e}"
-            )
-            return 0.0
-
-    def answer_grounding(
-        self,
-        answer: str,
-        retrieved_docs: List[Document],
-    ) -> float:
-        if not retrieved_docs:
+    def context_relevance(self, query_embedding, document_embeddings) -> float:
+        if not document_embeddings:
             return 0.0
         try:
-            answer_embedding = self._embed_query(answer)
-
-            doc_embeddings = self._embed_documents(
-                retrieved_docs
-            )
-
-            similarities = cosine_similarity(
-                [answer_embedding],
-                doc_embeddings
-            )[0]
-
-            score = float(np.max(similarities))
-
-            logger.info(
-                "Answer grounding: %.3f",
-                score
-            )
-
-            return score
-        except Exception as e:
-            logger.exception(
-                f"Failed to compute answer grounding: {e}"
-            )
+            similarities = cosine_similarity(normalize([query_embedding]), normalize(document_embeddings))[0]
+            weights = np.linspace(1.0, 0.5, len(similarities))
+            score = np.average(similarities, weights=weights)
+            return self._normalize_score(score)
+        except Exception:
+            logger.exception("Failed to compute context relevance")
             return 0.0
 
-    def context_coverage(
-        self,
-        answer: str,
-        retrieved_docs: List[Document],
-    ) -> float:
-        if not retrieved_docs:
+    def faithfulness(self, answer_embedding, document_embeddings) -> float:
+        if not document_embeddings:
             return 0.0
-
         try:
-            answer_embedding = self._embed_query(answer)
+            similarities = cosine_similarity(normalize([answer_embedding]), normalize(document_embeddings))[0]
+            score = np.max(similarities)
+            return self._normalize_score(score)
+        except Exception:
+            logger.exception("Failed to compute faithfulness")
+            return 0.0
 
-            doc_embeddings = self._embed_documents(
-                retrieved_docs
-            )
-
-            similarities = cosine_similarity(
-                [answer_embedding],
-                doc_embeddings
-            )[0]
-
-            return float(np.mean(similarities))
-        except Exception as e:
-            logger.exception(
-                f"Failed to compute context coverage: {e}"
-            )
+    def context_recall(self, answer_embedding, document_embeddings) -> float:
+        if not document_embeddings:
+            return 0.0
+        try:
+            similarities = cosine_similarity(normalize([answer_embedding]), normalize(document_embeddings))[0]
+            score = np.mean(similarities)
+            return self._normalize_score(score)
+        except Exception:
+            logger.exception("Failed to compute context recall")
             return 0.0
 
     @staticmethod
-    def document_count(
-        retrieved_docs: List[Document]
-    ) -> int:
+    def document_count(retrieved_docs: List[Document]) -> int:
         return len(retrieved_docs)
 
     @staticmethod
-    def average_document_length(
-        retrieved_docs: List[Document]
-    ) -> float:
+    def average_document_length(retrieved_docs: List[Document]) -> float:
         if not retrieved_docs:
             return 0.0
 
@@ -147,31 +79,29 @@ class RAGEvaluator:
             )
         )
 
-    def evaluate(
-        self,
-        query: str,
-        answer: str,
-        retrieved_docs: List[Document],
-    ) -> Dict[str, float]:
-        retrieval = self.retrieval_similarity(
-            query,
-            retrieved_docs
-        )
+    def evaluate(self, query: str, answer: str, retrieved_docs: List[Document]) -> Dict[str, float]:
+        try:
+            query_embedding = self._embed_query(query)
+            answer_embedding = self._embed_query(answer)
+            document_embeddings = self._embed_documents(retrieved_docs)
 
-        grounding = self.answer_grounding(
-            answer,
-            retrieved_docs
-        )
+            context_relevance = self.context_relevance(query_embedding, document_embeddings)
+            faithfulness = self.faithfulness(answer_embedding, document_embeddings)
+            context_recall = self.context_recall(answer_embedding, document_embeddings)
 
-        coverage = self.context_coverage(
-            answer,
-            retrieved_docs
-        )
-
-        return {
-            "retrieval_similarity": retrieval,
-            "answer_grounding": grounding,
-            "context_coverage": coverage,
-            "retrieved_documents": self.document_count(retrieved_docs),
-            "average_document_length": self.average_document_length(retrieved_docs),
-        }
+            return {
+                "context_relevance": context_relevance,
+                "faithfulness": faithfulness,
+                "context_recall": context_recall,
+                "retrieved_documents": self.document_count(retrieved_docs),
+                "average_document_length": self.average_document_length(retrieved_docs),
+            }
+        except Exception:
+            logger.exception("RAG evaluation failed")
+            return {
+                "context_relevance": 0.0,
+                "faithfulness": 0.0,
+                "context_recall": 0.0,
+                "retrieved_documents": self.document_count(retrieved_docs),
+                "average_document_length": self.average_document_length(retrieved_docs),
+            }

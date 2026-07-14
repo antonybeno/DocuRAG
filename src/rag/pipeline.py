@@ -94,9 +94,9 @@ class RAGPipeline:
             return QueryResponse(
                 answer=answer,
                 sources=retrieved_docs,
-                retrieval_confidence=evaluation["retrieval_similarity"],
-                hallucination_score=1 - evaluation["answer_grounding"]
+                retrieval_confidence=evaluation["context_relevance"],
+                hallucination_score=1 - evaluation["faithfulness"]
             )
-        except Exception as e:
-            logger.exception(f"RAG pipeline failed: {e}")
+        except Exception:
+            logger.exception("RAG pipeline failed")
             raise

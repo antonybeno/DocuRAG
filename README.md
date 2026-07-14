@@ -2,5 +2,6 @@
 
 ## TODO
 
-- Improve code quality and add documentation by identifying and resolving remaining issues
+- Improve code quality and identify any remaining issues and resolve it
 - Update Readme with full workflow
+- Add code documentation
