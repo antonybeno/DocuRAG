@@ -5,6 +5,7 @@ from typing import List
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.trace import StatusCode, Status
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel
 import uvicorn
@@ -12,9 +13,12 @@ import uvicorn
 from monitoring.observability import (
     tracer,
     rag_queries_total,
+    rag_errors,
     retrieved_documents,
     total_latency,
-    documents_uploaded
+    documents_uploaded,
+    retrieval_accuracy,
+    hallucination_rate
 )
 
 from rag.pipeline import RAGPipeline
@@ -68,6 +72,7 @@ rag_pipeline = RAGPipeline(
     evaluator,
     llm
 )
+rag_pipeline.initialize()
 
 docu_ingestion = DocumentIngestionService(
     file_manager,
@@ -77,7 +82,6 @@ docu_ingestion = DocumentIngestionService(
     metadata
 )
 
-metrics_app = make_asgi_app()
 app.mount(
     "/metrics",
     metrics_app
@@ -100,10 +104,8 @@ class QueryResponse(BaseModel):
 
 @app.post("/documents/upload")
 async def upload_document(file: UploadFile = File(...), user_id: str = "anonymous"):
-    start_time = time.time()
-    with tracer.start_as_current_span(
-            "document_upload"
-    ) as span:
+    start_time = time.perf_counter()
+    with tracer.start_as_current_span("document_upload") as span:
         try:
             logger.info(f"Document upload started: {file.filename}")
             span.set_attribute("filename", file.filename)
@@ -121,7 +123,7 @@ async def upload_document(file: UploadFile = File(...), user_id: str = "anonymou
                 user_id=user_id
             )
 
-            processing_time = (time.time() - start_time)
+            processing_time = (time.perf_counter() - start_time)
 
             if result["status"] == "success":
                 logger.info(
@@ -132,6 +134,7 @@ async def upload_document(file: UploadFile = File(...), user_id: str = "anonymou
                 documents_uploaded.add(1, attributes={"status": "success"})
                 span.set_attribute("status", "success")
                 span.set_attribute("chunks_created", result["chunks_created"])
+                span.set_attribute("processing_time", processing_time)
 
                 return JSONResponse(
                     status_code=200,
@@ -166,11 +169,13 @@ async def upload_document(file: UploadFile = File(...), user_id: str = "anonymou
 
 @app.get("/documents/list")
 async def list_documents():
-    documents = metadata.list_documents()
-    return {
-        "total_documents": len(documents),
-        "documents": documents
-    }
+    with tracer.start_as_current_span("list_documents") as span:
+        documents = metadata.list_documents()
+        span.set_attribute("documents_count", len(documents))
+        return {
+            "total_documents": len(documents),
+            "documents": documents
+        }
 
 
 @app.get("/documents/{file_id}")
@@ -210,67 +215,67 @@ async def get_vector_db_stats():
 @app.post("/documents/upload-batch")
 async def upload_batch(files: List[UploadFile] = File(...), user_id: str = "anonymous"):
     results = []
+    start_time = time.perf_counter()
+    with tracer.start_as_current_span("batch_upload") as span:
+        try:
+            span.set_attribute("file_count", len(files))
+            span.set_attribute("user_id", user_id)
 
-    with tracer.start_as_current_span(
-            "batch_upload"
-    ) as span:
-        span.set_attribute("file_count", len(files))
-        span.set_attribute("user_id", user_id)
-
-        for file in files:
-            result = (
-                docu_ingestion.process_document(
-                    file=file.file,
-                    filename=file.filename,
-                    user_id=user_id
+            for file in files:
+                result = (
+                    docu_ingestion.process_document(
+                        file=file.file,
+                        filename=file.filename,
+                        user_id=user_id
+                    )
                 )
+
+                results.append(result)
+
+                if result["status"] == "success":
+                    documents_uploaded.add(1, attributes={"status": "success"})
+                else:
+                    documents_uploaded.add(1, attributes={"status": "error"})
+
+            processing_time = (time.perf_counter() - start_time)
+            successful = sum(
+                1
+                for r in results
+                if r["status"] == "success"
             )
 
-            results.append(result)
+            logger.info(f"Batch upload completed: " f"{successful}/{len(files)}")
+            span.set_attribute("total_files", len(files))
+            span.set_attribute("processing_time", processing_time)
 
-            if result["status"] == "success":
-                documents_uploaded.add(1, attributes={"status": "success"})
-            else:
-                documents_uploaded.add(1, attributes={"status": "error"})
-
-        successful = sum(
-            1
-            for r in results
-            if r["status"] == "success"
-        )
-
-        logger.info(
-            f"Batch upload completed: "
-            f"{successful}/{len(files)}"
-        )
-
-        return {
-            "total_files": len(files),
-            "successful": successful,
-            "failed": len(files) - successful,
-            "results": results
-        }
+            return {
+                "total_files": len(files),
+                "successful": successful,
+                "failed": len(files) - successful,
+                "results": results
+            }
+        except Exception as e:
+            logger.error(f"Batch upload failed: {str(e)}")
+            documents_uploaded.add(1, attributes={"status": "error"})
+            span.record_exception(e)
+            raise HTTPException(
+                status_code=500,
+                detail=str(e)
+            )
 
 
 @app.post("/query")
-async def rag_query(request: QueryRequest) -> QueryResponse:
-    start_time = time.time()
-
-    with tracer.start_as_current_span(
-            "rag_query"
-    ) as span:
+async def query(request: QueryRequest) -> QueryResponse:
+    start_time = time.perf_counter()
+    with tracer.start_as_current_span("query") as span:
         try:
             span.set_attribute("user_id", request.user_id)
             span.set_attribute("session_id", request.session_id)
             result = rag_pipeline.query(request.query)
-            answer = result["answer"]
-            retrieved_docs = result["documents"]
+            retrieved_docs = result.sources
             retrieved_documents.add(len(retrieved_docs))
-            metrics = result.get("metrics", {})
-            retrieval_confidence = float(metrics.get("retrieval_accuracy", 0.0))
-            hallucination_score = float(metrics.get("hallucination_rate", 0.0))
-            span.set_attribute("retrieval_accuracy", retrieval_confidence)
-            span.set_attribute("hallucination_rate", hallucination_score)
+            retrieval_confidence = result.retrieval_confidence
+            hallucination_score = result.hallucination_score
 
             if hallucination_score > 0.3:
                 status = "hallucination_detected"
@@ -292,13 +297,16 @@ async def rag_query(request: QueryRequest) -> QueryResponse:
                     }
                 )
 
-            total_time = (time.time() - start_time)
+            total_time = (time.perf_counter() - start_time)
             total_latency.record(
                 total_time,
-                attributes={
-                    "endpoint": "rag_query"
-                }
+                attributes={"endpoint": "/query"}
             )
+            retrieval_accuracy.record(retrieval_confidence)
+            hallucination_rate.record(hallucination_score)
+            span.set_attribute("query.duration", total_time)
+            span.set_attribute("query.retrieval_accuracy", retrieval_confidence)
+            span.set_attribute("query.hallucination_rate", hallucination_score)
             logger.info(
                 f"RAG completed "
                 f"status={status} "
@@ -307,7 +315,7 @@ async def rag_query(request: QueryRequest) -> QueryResponse:
             )
 
             return QueryResponse(
-                answer=answer,
+                answer=result.answer,
                 sources=sources,
                 latency_ms=total_time * 1000,
                 retrieval_confidence=retrieval_confidence,
@@ -315,6 +323,7 @@ async def rag_query(request: QueryRequest) -> QueryResponse:
             )
         except Exception as e:
             rag_queries_total.add(1, attributes={"status": "error"})
+            rag_errors.add(1)
             logger.error(
                 f"RAG query failed: {str(e)}",
                 exc_info=True
@@ -322,6 +331,7 @@ async def rag_query(request: QueryRequest) -> QueryResponse:
 
             span.record_exception(e)
             span.set_attribute("error", True)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
 
             raise HTTPException(
                 status_code=500,

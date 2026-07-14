@@ -91,6 +91,18 @@ total_latency = meter.create_histogram(
     unit="s"
 )
 
+retrieval_accuracy = meter.create_histogram(
+    "retrieval_accuracy",
+    description="Retrieval accuracy",
+    unit="1"
+)
+
+hallucination_rate = meter.create_histogram(
+    "hallucination_rate",
+    description="Hallucination score",
+    unit="1"
+)
+
 
 vector_db_size = meter.create_up_down_counter(
     "vector_db_size_documents",
@@ -98,22 +110,14 @@ vector_db_size = meter.create_up_down_counter(
 )
 
 
-llm_token_usage = meter.create_up_down_counter(
-    "llm_token_usage_total",
-    description="LLM token usage"
+llm_token_usage = meter.create_counter(
+    "llm_tokens_total",
+    description="Total LLM tokens"
 )
 
-
-retrieval_accuracy = meter.create_up_down_counter(
-    "retrieval_accuracy_percent",
-    description="Retrieval confidence"
+rag_errors = meter.create_counter(
+    "rag_errors_total",
+    description="Failed RAG queries"
 )
-
-
-hallucination_rate = meter.create_up_down_counter(
-    "hallucination_rate_percent",
-    description="Hallucination score"
-)
-
 
 tracer = trace.get_tracer("rag_system")
