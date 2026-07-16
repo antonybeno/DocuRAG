@@ -4,3 +4,6 @@ faiss_index
 data
 processed_documents
 uploaded_documents
+__pycache__/
+*.py[cod]
+*$py.class
